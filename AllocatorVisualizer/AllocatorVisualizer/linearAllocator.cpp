@@ -1,5 +1,6 @@
 #include "linearAllocator.h"
 #include <cstdlib>
+#include <iterator>
 
 LinearAllocator::LinearAllocator(size_t size)
 	:m_totalSize(size), m_offset(0)
@@ -40,5 +41,15 @@ void* LinearAllocator::Allocate(size_t size, size_t alignment)
 
 void LinearAllocator::Clear()
 {
+	for (std::vector<AllocatorHeader>::reverse_iterator rit = m_metadata.rbegin(); rit != m_metadata.rend(); ++rit)
+	{
+		rit->dstr(rit->address);
+	}
 	m_offset = 0;
+}
+
+void LinearAllocator::RegisterMetadata(void* ptr, DestructorCallback callback)
+{
+	AllocatorHeader header = { ptr,callback };
+	m_metadata.push_back(header);
 }

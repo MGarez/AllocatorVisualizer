@@ -1,5 +1,5 @@
 #include "linearAllocator.h"
-
+#include "TestObject.h"
 #include <iostream>
 
 struct TestVec3
@@ -48,6 +48,8 @@ int main()
 		std::cout << "Allocated TestStruct at address: " << test_struct << " with value: " << test_struct->d << '\n';
 	}
 
+	TestObject* object = alloc<TestObject>(custom_allocator);
+	
 
 	std::cout << "Clearing Allocator\n";
 	custom_allocator.Clear();
