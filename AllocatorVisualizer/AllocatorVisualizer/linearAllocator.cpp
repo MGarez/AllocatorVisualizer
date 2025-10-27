@@ -10,6 +10,9 @@ LinearAllocator::LinearAllocator(size_t size)
 
 LinearAllocator::~LinearAllocator()
 {
+	// Ensure we don't have resources pending to clear
+	Clear();
+
 	free(m_startPtr);
 	m_startPtr = nullptr;
 }
