@@ -86,6 +86,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="..\ThirdParty\imgui\misc\debuggers\imgui.natstepfilter" />
+    <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
     <Natvis Include="..\ThirdParty\imgui\misc\debuggers\imgui.natvis" />
