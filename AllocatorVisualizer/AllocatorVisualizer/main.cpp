@@ -2,7 +2,8 @@
 #include "TestObject.h"
 #include "imgui.h"
 #include <iostream>
-#include <string.h>
+#include <string>
+#include <stdlib.h>
 
 #ifndef UNICODE
 #define UNICODE
@@ -202,14 +203,58 @@ void Application::Update()
 
 void Application::Render()
 {
+	// Record all the commands needed
+	PopulateCommandList();
+
+	// Execute Command list
+	ID3D12CommandList* ppclist[] = { m_clist.Get() };
+	m_cqueue->ExecuteCommandLists(_countof(ppclist), ppclist);
+
+	// Present the frame
+	ThrowIfFailed(m_swapchain->Present(1, 0));
+
+	WaitForPreviousFrame();
 }
 
 void Application::PopulateCommandList()
 {
+	ThrowIfFailed(m_callocator->Reset());
+
+	ThrowIfFailed(m_clist->Reset(m_callocator.Get(), NULL));
+
+	m_clist->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_rtvs[m_frameIndex].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
+
+	CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvheap->GetCPUDescriptorHandleForHeapStart(), m_frameIndex, m_rtv_descriptorSize);
+
+	// Record commands.
+	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
+	m_clist->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+
+	// Indicate that the back buffer will now be used to present.
+	m_clist->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_rtvs[m_frameIndex].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));
+
+	ThrowIfFailed(m_clist->Close());
 }
 
 void Application::WaitForPreviousFrame()
 {
+	// WAITING FOR THE FRAME TO COMPLETE BEFORE CONTINUING IS NOT BEST PRACTICE.
+	// This is code implemented as such for simplicity.
+
+	// Signal and increment
+	const UINT64 fence = m_fvalue;
+	ThrowIfFailed(m_cqueue->Signal(m_fence.Get(), fence));
+	++m_fvalue;
+
+	// Wait for the previous frame
+	if (m_fence->GetCompletedValue() < fence)
+	{
+		ThrowIfFailed(m_fence->SetEventOnCompletion(fence, m_fevent));
+		WaitForSingleObject(m_fevent, INFINITE);
+	}
+
+	m_frameIndex = m_swapchain->GetCurrentBackBufferIndex();
+	
 }
 
 void Application::GetHardwareAdapter(IDXGIFactory6* pFactory, IDXGIAdapter1** ppAdapter)
@@ -234,11 +279,12 @@ void Application::Shutdown()
 {
 	WaitForPreviousFrame();
 
-	CloseHandle(m_fEvent);
+	CloseHandle(m_fevent);
 }
 
 LRESULT CALLBACK WndPrc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+	Application* app = reinterpret_cast<Application*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
 	switch (msg)
 	{
 	case WM_DESTROY:
@@ -246,15 +292,10 @@ LRESULT CALLBACK WndPrc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		return 0;
 
 	case WM_PAINT:
+		if (app)
 		{
-			PAINTSTRUCT ps;
-			HDC hdc = BeginPaint(hwnd, &ps);
-
-			// All painting occurs here, between BeginPaint and EndPaint.
-
-			FillRect(hdc, &ps.rcPaint, (HBRUSH)(COLOR_WINDOW + 1));
-
-			EndPaint(hwnd, &ps);
+			app->Update();
+			app->Render();
 		}
 		return 0;
 	}
@@ -297,6 +338,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR pCmdLin
 		return 0;
 	}
 
+	// Init application
+	Application app;
+	SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&app));
+	app.Init();
+
 	::ShowWindow(hwnd, nShowCmd);
 
 	// Message Loop
@@ -311,12 +357,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR pCmdLin
 		}
 	}
 
+	app.Shutdown();
+
 	// Return this part of the WM_QUIT message to Windows.
 	return static_cast<char>(msg.wParam);
 }
 
 /*
 struct TestVec3
+{
 {
 	int32_t x;
 	int32_t y;
