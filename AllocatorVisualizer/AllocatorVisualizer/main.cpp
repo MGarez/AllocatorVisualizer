@@ -1,6 +1,8 @@
 #include "linearAllocator.h"
 #include "TestObject.h"
 #include "imgui.h"
+#include "backends/imgui_impl_win32.h"
+#include "backends/imgui_impl_dx12.h"
 #include <iostream>
 #include <string>
 #include <stdlib.h>
@@ -30,7 +32,52 @@ const UINT HEIGHT = 720;
 
 const UINT FRAMES = 2;
 
-HWND hwnd;
+HWND g_hwnd;
+
+// Simple free list based allocator
+struct ExampleDescriptorHeapAllocator
+{
+	ID3D12DescriptorHeap* Heap = nullptr;
+	D3D12_DESCRIPTOR_HEAP_TYPE  HeapType = D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES;
+	D3D12_CPU_DESCRIPTOR_HANDLE HeapStartCpu;
+	D3D12_GPU_DESCRIPTOR_HANDLE HeapStartGpu;
+	UINT                        HeapHandleIncrement;
+	ImVector<int>               FreeIndices;
+
+	void Create(ID3D12Device* device, ID3D12DescriptorHeap* heap)
+	{
+		IM_ASSERT(Heap == nullptr && FreeIndices.empty());
+		Heap = heap;
+		D3D12_DESCRIPTOR_HEAP_DESC desc = heap->GetDesc();
+		HeapType = desc.Type;
+		HeapStartCpu = Heap->GetCPUDescriptorHandleForHeapStart();
+		HeapStartGpu = Heap->GetGPUDescriptorHandleForHeapStart();
+		HeapHandleIncrement = device->GetDescriptorHandleIncrementSize(HeapType);
+		FreeIndices.reserve((int)desc.NumDescriptors);
+		for (int n = desc.NumDescriptors; n > 0; n--)
+			FreeIndices.push_back(n - 1);
+	}
+	void Destroy()
+	{
+		Heap = nullptr;
+		FreeIndices.clear();
+	}
+	void Alloc(D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu_desc_handle, D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_desc_handle)
+	{
+		IM_ASSERT(FreeIndices.Size > 0);
+		int idx = FreeIndices.back();
+		FreeIndices.pop_back();
+		out_cpu_desc_handle->ptr = HeapStartCpu.ptr + (idx * HeapHandleIncrement);
+		out_gpu_desc_handle->ptr = HeapStartGpu.ptr + (idx * HeapHandleIncrement);
+	}
+	void Free(D3D12_CPU_DESCRIPTOR_HANDLE out_cpu_desc_handle, D3D12_GPU_DESCRIPTOR_HANDLE out_gpu_desc_handle)
+	{
+		int cpu_idx = (int)((out_cpu_desc_handle.ptr - HeapStartCpu.ptr) / HeapHandleIncrement);
+		int gpu_idx = (int)((out_gpu_desc_handle.ptr - HeapStartGpu.ptr) / HeapHandleIncrement);
+		IM_ASSERT(cpu_idx == gpu_idx);
+		FreeIndices.push_back(cpu_idx);
+	}
+};
 
 inline std::string HrToString(HRESULT hr)
 {
@@ -56,6 +103,7 @@ inline void ThrowIfFailed(HRESULT hr)
 	}
 }
 
+ExampleDescriptorHeapAllocator g_dsvalloc;
 
 class Application
 {
@@ -66,6 +114,15 @@ public:
 	void Render();
 	void Shutdown();
 
+
+public:
+
+	ComPtr<ID3D12Device> m_device;
+	ComPtr<ID3D12CommandQueue> m_cqueue;
+	ComPtr<ID3D12GraphicsCommandList> m_clist;
+	ComPtr<ID3D12DescriptorHeap> m_dsvheap;
+	
+
 private:
 
 	void LoadPipeline();
@@ -74,10 +131,7 @@ private:
 	void WaitForPreviousFrame();
 	void GetHardwareAdapter(IDXGIFactory6* pFactory, IDXGIAdapter1** ppAdapter);
 
-	ComPtr<ID3D12Device> m_device;
-	ComPtr<ID3D12CommandQueue> m_cqueue;
 	ComPtr<ID3D12CommandAllocator> m_callocator;
-	ComPtr<ID3D12GraphicsCommandList> m_clist;
 	ComPtr<IDXGISwapChain3> m_swapchain;
 	ComPtr<ID3D12DescriptorHeap> m_rtvheap;
 	ComPtr<ID3D12Resource> m_rtvs[FRAMES];
@@ -137,7 +191,7 @@ void Application::LoadPipeline()
 	ComPtr<IDXGISwapChain1> swapChain;
 	ThrowIfFailed(factory->CreateSwapChainForHwnd(
 		m_cqueue.Get(),        // Swap chain needs the queue so that it can force a flush on it.
-		hwnd,
+		g_hwnd,
 		&swapchain_desc,
 		nullptr,
 		nullptr,
@@ -145,7 +199,7 @@ void Application::LoadPipeline()
 	));
 
 	// This sample does not support fullscreen transitions.
-	ThrowIfFailed(factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER));
+	ThrowIfFailed(factory->MakeWindowAssociation(g_hwnd, DXGI_MWA_NO_ALT_ENTER));
 
 	ThrowIfFailed(swapChain.As(&m_swapchain));
 	m_frameIndex = m_swapchain->GetCurrentBackBufferIndex();
@@ -173,6 +227,14 @@ void Application::LoadPipeline()
 		rtv_handle.Offset(1, m_rtv_descriptorSize);
 	}
 
+
+	D3D12_DESCRIPTOR_HEAP_DESC dsv_desc = {};
+	dsv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	dsv_desc.NumDescriptors = 1;
+	dsv_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+	ThrowIfFailed(m_device->CreateDescriptorHeap(&dsv_desc, IID_PPV_ARGS(&m_dsvheap)));
+	
+	g_dsvalloc.Create(m_device.Get(), m_dsvheap.Get());
 	// Create the command allocator
 	ThrowIfFailed(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_callocator)));
 }
@@ -226,9 +288,39 @@ void Application::PopulateCommandList()
 
 	CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvheap->GetCPUDescriptorHandleForHeapStart(), m_frameIndex, m_rtv_descriptorSize);
 
+	// Bind RTV as the current render target
+	m_clist->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+	// Set viewport and scissor to match the backbuffer
+	D3D12_VIEWPORT vp;
+	vp.TopLeftX = 0.0f;
+	vp.TopLeftY = 0.0f;
+	vp.Width = static_cast<FLOAT>(WIDTH);
+	vp.Height = static_cast<FLOAT>(HEIGHT);
+	vp.MinDepth = 0.0f;
+	vp.MaxDepth = 1.0f;
+	m_clist->RSSetViewports(1, &vp);
+
+	D3D12_RECT scissor;
+	scissor.left = 0;
+	scissor.top = 0;
+	scissor.right = static_cast<LONG>(WIDTH);
+	scissor.bottom = static_cast<LONG>(HEIGHT);
+	m_clist->RSSetScissorRects(1, &scissor);
+
 	// Record commands.
 	const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
 	m_clist->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+
+	// Set descriptor heap(s) used by ImGui (shader-visible CBV_SRV_UAV heap)
+	ID3D12DescriptorHeap* heaps[] = { m_dsvheap.Get() };
+	m_clist->SetDescriptorHeaps(_countof(heaps), heaps);
+
+	// Render Dear ImGui into this command list (must be done while command list is recording)
+	if (ImGui::GetDrawData())
+	{
+		ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), m_clist.Get());
+	}
 
 	// Indicate that the back buffer will now be used to present.
 	m_clist->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_rtvs[m_frameIndex].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));
@@ -282,9 +374,13 @@ void Application::Shutdown()
 	CloseHandle(m_fevent);
 }
 
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
 LRESULT CALLBACK WndPrc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-	Application* app = reinterpret_cast<Application*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+	if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
+		return true;
+
 	switch (msg)
 	{
 	case WM_DESTROY:
@@ -292,11 +388,9 @@ LRESULT CALLBACK WndPrc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		return 0;
 
 	case WM_PAINT:
-		if (app)
-		{
-			app->Update();
-			app->Render();
-		}
+		PAINTSTRUCT ps;
+		HDC hdc = BeginPaint(hwnd, &ps);
+		EndPaint(hwnd, &ps);
 		return 0;
 	}
 	return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -319,7 +413,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR pCmdLin
 	::AdjustWindowRect(&window_rect, WS_OVERLAPPEDWINDOW, FALSE);
 
 	// Create a window and store its handle
-	hwnd = CreateWindow(
+	g_hwnd = CreateWindow(
 		window_class.lpszClassName,
 		L"Allocator Visualizer",
 		WS_OVERLAPPEDWINDOW,
@@ -332,7 +426,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR pCmdLin
 		hInstance,
 		nullptr);
 
-	if (!hwnd)
+	if (!g_hwnd)
 	{
 		// Window creation failed
 		return 0;
@@ -340,22 +434,66 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR pCmdLin
 
 	// Init application
 	Application app;
-	SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&app));
 	app.Init();
 
-	::ShowWindow(hwnd, nShowCmd);
+	::ShowWindow(g_hwnd, SW_SHOWDEFAULT);
 
-	// Message Loop
+	// Setup Dear ImGui context
+	IMGUI_CHECKVERSION();
+	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO();
+	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+	io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+
+
+	ImGui_ImplWin32_Init(g_hwnd);
+	// Setup Platform/Renderer backends
+	ImGui_ImplDX12_InitInfo init_info = {};
+	init_info.Device = app.m_device.Get();
+	init_info.CommandQueue = app.m_cqueue.Get();
+	init_info.NumFramesInFlight = FRAMES;
+	init_info.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM; // Or your render target format.
+
+	// Allocating SRV descriptors (for textures) is up to the application, so we provide callbacks.
+	// The example_win32_directx12/main.cpp application include a simple free-list based allocator.
+	init_info.SrvDescriptorHeap = app.m_dsvheap.Get();
+	init_info.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu_handle, D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle) { return g_dsvalloc.Alloc(out_cpu_handle, out_gpu_handle); };
+	init_info.SrvDescriptorFreeFn = [](ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle, D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle) { return g_dsvalloc.Free(cpu_handle, gpu_handle); };
+
+	ImGui_ImplDX12_Init(&init_info);
+	ImGui_ImplDX12_CreateDeviceObjects();
+
 	MSG msg = {};
-	while (msg.message != WM_QUIT)
+	bool done = false;
+	while (!done)
 	{
-		// Process any messages in the queue.
-		if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+		
+		while (::PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE))
 		{
-			TranslateMessage(&msg);
-			DispatchMessage(&msg);
+			::TranslateMessage(&msg);
+			::DispatchMessage(&msg);
+			if (msg.message == WM_QUIT)
+				done = true;
 		}
+		if (done)
+			break;
+
+		ImGui_ImplDX12_NewFrame();
+		ImGui_ImplWin32_NewFrame();
+		ImGui::NewFrame();
+		ImGui::ShowDemoWindow();
+
+		app.Update();
+
+		ImGui::Render();
+		
+		app.Render();
 	}
+
+	// Cleanup
+	ImGui_ImplDX12_Shutdown();
+	ImGui_ImplWin32_Shutdown();
+	ImGui::DestroyContext();
 
 	app.Shutdown();
 

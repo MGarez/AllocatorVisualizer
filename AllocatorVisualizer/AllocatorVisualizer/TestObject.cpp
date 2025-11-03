@@ -1,6 +1,5 @@
 #include "TestObject.h"
 
-
 TestObject::TestObject()
 	: m_data(0)
 {
