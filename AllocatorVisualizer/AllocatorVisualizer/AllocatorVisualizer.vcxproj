@@ -144,8 +144,12 @@
     <ClCompile Include="..\ThirdParty\imgui\imgui_tables.cpp" />
     <ClCompile Include="..\ThirdParty\imgui\imgui_widgets.cpp" />
     <ClCompile Include="..\ThirdParty\imgui\misc\cpp\imgui_stdlib.cpp" />
-    <ClCompile Include="linearAllocator.cpp" />
+    <ClCompile Include="BaseAllocator.cpp" />
+    <ClCompile Include="FreeListAllocator.cpp" />
+    <ClCompile Include="LinearAllocator.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="PoolAllocator.cpp" />
+    <ClCompile Include="StackAllocator.cpp" />
     <ClCompile Include="TestObject.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -158,7 +162,11 @@
     <ClInclude Include="..\ThirdParty\imgui\imstb_textedit.h" />
     <ClInclude Include="..\ThirdParty\imgui\imstb_truetype.h" />
     <ClInclude Include="..\ThirdParty\imgui\misc\cpp\imgui_stdlib.h" />
-    <ClInclude Include="linearAllocator.h" />
+    <ClInclude Include="BaseAllocator.h" />
+    <ClInclude Include="FreeListAllocator.h" />
+    <ClInclude Include="LinearAllocator.h" />
+    <ClInclude Include="PoolAllocator.h" />
+    <ClInclude Include="StackAllocator.h" />
     <ClInclude Include="TestObject.h" />
   </ItemGroup>
   <ItemGroup>
