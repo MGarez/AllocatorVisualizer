@@ -10,49 +10,35 @@ LinearAllocator::LinearAllocator(size_t size)
 
 LinearAllocator::~LinearAllocator()
 {
-	// Ensure we don't have resources pending to clear
-	Clear();
-
 	free(m_startPtr);
 	m_startPtr = nullptr;
 }
 
 void* LinearAllocator::Allocate(size_t size, size_t alignment)
 {	
-	void* current_ptr = static_cast<char*>(m_startPtr) + m_offset;
+	uintptr_t current_ptr = reinterpret_cast<uintptr_t>(m_startPtr) + m_offset;
 
-	size_t padding = 0;
+	uintptr_t aligned_ptr = (current_ptr + alignment - 1) & ~(alignment - 1);
 
-	size_t aux = reinterpret_cast<uintptr_t>(current_ptr) % alignment;
-
-	if (aux != 0)
-	{
-		padding = alignment - aux;
-	}
+	size_t padding = aligned_ptr - current_ptr;
 
 	if (size + padding +  m_offset > m_totalSize)
 	{
 		return nullptr;
 	}
 
-	void* aligned_ptr = static_cast<char*>(current_ptr) + padding;
-
 	m_offset += size + padding;
 
-	return aligned_ptr;
+	return reinterpret_cast<void*>(aligned_ptr);
 }
 
-void LinearAllocator::Clear()
+void LinearAllocator::Free(void* ptr)
 {
-	for (std::vector<AllocatorHeader>::reverse_iterator rit = m_metadata.rbegin(); rit != m_metadata.rend(); ++rit)
-	{
-		rit->dstr(rit->address);
-	}
+	// Cannot free individual allocations so do nothing
+}
+
+void LinearAllocator::Reset()
+{
 	m_offset = 0;
 }
 
-void LinearAllocator::RegisterMetadata(void* ptr, DestructorCallback callback)
-{
-	AllocatorHeader header = { ptr,callback };
-	m_metadata.push_back(header);
-}
