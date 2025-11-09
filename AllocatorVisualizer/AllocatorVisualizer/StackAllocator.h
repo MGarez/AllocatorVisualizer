@@ -4,8 +4,8 @@
 
 struct StackAllocatorHeader
 {
-	size_t adjustment;
 	void* prev_ptr;
+	size_t prev_offset;
 };
 
 class StackAllocator : public BaseAllocator

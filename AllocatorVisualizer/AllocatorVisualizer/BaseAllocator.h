@@ -18,10 +18,35 @@ public:
 	virtual void Free(void* ptr) = 0;
 	virtual void Reset() = 0;
 
-	/*
-	// Visualization helper functions
-	virtual size_t GetUsedMemory() const {return m_usedSize;}
-	virtual size_t GetTotalMemory() const {return m_totalSize};
-	virtual  std::vector<MemoryBlock> GetMemoryBlocks() const = 0
-	*/
+protected:
+
+	inline size_t AlignAdjustment(const void* ptr, size_t alignment)
+	{
+		size_t adjustment = alignment - (reinterpret_cast<uintptr_t>(ptr) & (alignment - 1));
+
+		if (adjustment == alignment)
+		{
+			return 0;
+		}
+
+		return alignment;
+	}
+
+	inline size_t AlignAdjustmentWithHeader(const void* ptr, size_t alignment, size_t header_size)
+	{
+		size_t adjustment = AlignAdjustment(ptr, alignment);
+
+		if (adjustment < header_size)
+		{
+			size_t remaining = header_size - adjustment;
+
+			adjustment += alignment * (remaining / alignment);
+			if (remaining % alignment != 0)
+			{
+				adjustment += alignment;
+			}
+		}
+		return adjustment;
+	}
+
 };
